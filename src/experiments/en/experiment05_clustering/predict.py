@@ -16,8 +16,8 @@ from src.experiments.en.experiment05_clustering.model import (
 )
 
 # config 
-k = 19
-method = "01_kmeans/100"
+k = 10
+method = "01_kmeans/500"
 
 dataset = "en"
 
@@ -25,7 +25,7 @@ TRAIN_PATH = os.path.join("dataset", dataset, "train_all.csv")
 TEST_PATH  = os.path.join("dataset", dataset, "test.csv")
 RESULTS_DIR = os.path.join("results", dataset, "experiment05_clustering", method)
 
-result_path = os.path.join("results", dataset, "experiment05_clustering", method, f"{k:03d}")
+result_path = os.path.join(RESULTS_DIR, f"{k:03d}")
 GOOD_DB_PATH = os.path.join(RESULTS_DIR, "good_db_vectors.npy")
 BAD_DB_PATH  = os.path.join(RESULTS_DIR, "bad_db_vectors.npy")
 
@@ -39,6 +39,9 @@ def get_device() -> str :
 
 
 def main() :
+
+    os.makedirs(result_path, exist_ok = True)
+    print(f"[INFO] Result path :: {result_path}")
 
     # 1. 데이터 로드
     print(f"[INFO] Loading train dataset from {TRAIN_PATH} ...")
@@ -73,18 +76,12 @@ def main() :
     )
     print("[INFO] Embedding model loaded.")
 
-    # 4. train / test 임베딩
+    # 4. train 임베딩
     print("[INFO] Encoding train texts ...")
     t0 = time.perf_counter()
     train_vectors = embedder.encode(list(X_train))   # (N_train, D)
     t1 = time.perf_counter()
     write_time(t1 - t0, os.path.join(result_path, "time.txt"), "Train embedding")
-
-    print("[INFO] Encoding test texts ...")
-    t0 = time.perf_counter()
-    test_vectors = embedder.encode(list(X_test))     # (N_test, D)
-    t1 = time.perf_counter()
-    write_time(t1 - t0, os.path.join(result_path, "time.txt"), "Test embedding")
 
     # 5. k-NN 기반 feature 생성
     k_neighbors = k
@@ -99,6 +96,14 @@ def main() :
     )  # (N_train, 2*k)
     t1 = time.perf_counter()
     write_time(t1 - t0, os.path.join(result_path, "time.txt"), "Build train features")
+
+    
+    # 6. test 임베딩
+    print("[INFO] Encoding test texts ...")
+    t0 = time.perf_counter()
+    test_vectors = embedder.encode(list(X_test))     # (N_test, D)
+    t1 = time.perf_counter()
+    write_time(t1 - t0, os.path.join(result_path, "time.txt"), "Test embedding")
 
     t0 = time.perf_counter()
     test_feats = build_knn_features(
@@ -122,7 +127,7 @@ def main() :
     train_feats = nan_to_col_mean(train_feats)
     test_feats  = nan_to_col_mean(test_feats)
 
-    # 6. DistanceNN 학습 세팅
+    # 7. DistanceNN 학습 세팅
     input_dim = train_feats.shape[1]
     config = DistanceNNConfig(
         input_dim   = input_dim,
@@ -168,7 +173,7 @@ def main() :
     criterion = torch.nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr = 1e-3)
 
-    # 7. 학습 루프
+    # 8. 학습 루프
     num_epochs = 10
     t0 = time.perf_counter()
 
@@ -210,12 +215,17 @@ def main() :
 
     # 8. test 평가
     print("[INFO] Evaluating on test set with DistanceNN ...")
+
+    t0 = time.perf_counter()
     model.eval()
     with torch.no_grad():
         X_test_tensor = torch.from_numpy(test_feats).float().to(device)
         logits = model(X_test_tensor)
         probs = torch.sigmoid(logits).cpu().numpy()
         y_pred = (probs >= 0.5).astype(int)
+
+    t1 = time.perf_counter()
+    write_time(t1 - t0, os.path.join(result_path, "time.txt"), "NN test")
 
     metrics_path = os.path.join(result_path, "metrics.txt")
     evaluate(y_test, y_pred, metrics_path)
