@@ -16,8 +16,8 @@ from src.experiments.en.experiment05_clustering.model import (
 )
 
 # config 
-k = 10
-method = "01_kmeans/500"
+k = 20
+method = "02_dbscan/03"
 
 dataset = "en"
 
