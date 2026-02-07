@@ -6,6 +6,7 @@ import time
 import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
+from sklearn.neighbors import NearestNeighbors
 
 from src.core.data import load_dataset, find_numbering
 from src.core.embedding import Embedder
@@ -16,8 +17,8 @@ from src.core.metrics import write_time, write_config
 dataset = "en"
 
 # Incremental clustering hyper-parameters
-eps_1_good = 0.5  # distance threshold for good
-eps_1_bad = 0.5   # distance threshold for bad
+eps_1_good = 1.0  # distance threshold for good
+eps_1_bad = 1.0   # distance threshold for bad
 
 eps_2_good = 0.9  # overlap ratio threshold for good
 eps_2_bad = 0.9    # overlap ratio threshold for bad
@@ -90,25 +91,37 @@ class Centroid:
 
 def find_nearest_centroid(
     vector: np.ndarray,
-    centroids: list[Centroid],
+    target_centroids: list[Centroid],
     eps: float,
-    target_label: int,
+    nn_index: NearestNeighbors | None = None,
 ) -> Centroid | None:
     """
     같은 label의 centroid 중에서 가장 가까운 것을 찾음
     거리가 eps 이하인 경우에만 반환
+    
+    KDTree를 사용하여 최적화
     """
-    if len(centroids) == 0:
+    if len(target_centroids) == 0:
         return None
     
+    # KDTree 인덱스가 있으면 사용
+    if nn_index is not None:
+        try:
+            distances, indices = nn_index.kneighbors(vector.reshape(1, -1), n_neighbors=1)
+            dist = distances[0, 0]
+            idx = indices[0, 0]
+            
+            if dist <= eps and idx < len(target_centroids):
+                return target_centroids[idx]
+        except Exception:
+            # KDTree 실패 시 fallback
+            pass
+    
+    # Fallback: 선형 검색
     min_dist = float('inf')
     nearest = None
     
-    for centroid in centroids:
-        # 같은 label만 체크
-        if centroid.label != target_label:
-            continue
-        
+    for centroid in target_centroids:
         dist = np.linalg.norm(vector - centroid.position)
         if dist < min_dist:
             min_dist = dist
@@ -238,11 +251,39 @@ def incremental_clustering(
     centroids: list[Centroid] = []
     next_centroid_id = 0
     
+    # KDTree 인덱스 재구축 주기
+    rebuild_index_every = 100
+    nn_index = None
+    
+    def rebuild_kdtree():
+        """같은 label의 centroid들에 대해 KDTree 인덱스 재구축"""
+        nonlocal nn_index
+        
+        target_centroids = [c for c in centroids if c.label == target_label]
+        if len(target_centroids) == 0:
+            nn_index = None
+            return
+        
+        positions = np.stack([c.position for c in target_centroids], axis=0)
+        
+        try:
+            nn_index = NearestNeighbors(n_neighbors=1, algorithm='kd_tree', metric='euclidean')
+            nn_index.fit(positions)
+        except Exception:
+            nn_index = None
+    
     for i in range(class_vectors.shape[0]):
         vector = class_vectors[i]
         
-        # 같은 label의 centroid 중에서 가장 가까운 것 찾기
-        nearest = find_nearest_centroid(vector, centroids, eps_1, target_label)
+        # 같은 label의 centroid만 필터링
+        target_centroids = [c for c in centroids if c.label == target_label]
+        
+        # 주기적으로 KDTree 인덱스 재구축 (centroid가 있을 때만)
+        if len(target_centroids) > 0 and i % rebuild_index_every == 0:
+            rebuild_kdtree()
+        
+        # 가장 가까운 centroid 찾기
+        nearest = find_nearest_centroid(vector, target_centroids, eps_1, nn_index)
         
         if nearest is not None:
             # 가장 가까운 centroid에 멤버 추가
@@ -268,6 +309,9 @@ def incremental_clustering(
                     centroids.extend(new_centroids)
                     next_centroid_id += len(new_centroids)
                     
+                    # centroid가 변경되었으므로 인덱스 재구축
+                    rebuild_kdtree()
+                    
                     print(f"[INFO] Merged and split centroids -> created {len(new_centroids)} new centroids")
         else:
             # 새로운 centroid 생성
@@ -279,6 +323,9 @@ def incremental_clustering(
             )
             centroids.append(new_centroid)
             next_centroid_id += 1
+            
+            # 새 centroid가 추가되었으므로 인덱스 재구축
+            rebuild_kdtree()
         
         if (i + 1) % 1000 == 0:
             print(f"[INFO] Processed {i + 1}/{class_vectors.shape[0]} samples, "
